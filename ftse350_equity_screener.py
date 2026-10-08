@@ -1,38 +1,26 @@
 """
 FTSE 350 Equity Screener
 ========================
-Screens a sample of FTSE 350 stocks using valuation, dividend,
+Screens FTSE 350 stocks using valuation, dividend,
 market-cap and price-momentum signals.
 
 Author: Roman Falla
-GitHub: github.com/romanfalla343-jpg
-
-Dependencies:
-    pip install yfinance pandas numpy
-
-Usage:
-    python ftse350_equity_screener.py
-
-Or import and customise thresholds:
-    from ftse350_equity_screener import run_screener
-    results = run_screener(max_pe=20, min_momentum_3m=0.05)
 """
 
 import datetime
 import warnings
+import logging
 
 import numpy as np
 import pandas as pd
 import yfinance as yf
 
 warnings.filterwarnings("ignore")
+logging.getLogger("yfinance").setLevel(logging.CRITICAL)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# FTSE 350 TICKERS
-# A hand-picked sample of FTSE 350 constituents.
-# This is not the full FTSE 350 universe.
-# Yahoo Finance uses the .L suffix for London Stock Exchange securities.
+# FTSE 350 SAMPLE UNIVERSE
 # ─────────────────────────────────────────────────────────────────────────────
 
 FTSE_350_TICKERS = [
@@ -52,11 +40,11 @@ FTSE_350_TICKERS = [
     "TSCO.L", "TW.L", "ULVR.L", "UU.L", "VOD.L", "WEIR.L", "WPP.L",
     "WTB.L",
 
-    # FTSE 250 selection
+    # FTSE 250 sample
     "ABG.L", "ACSO.L", "AGK.L", "AML.L", "BNZL.L", "BOWL.L", "BTG.L",
     "CAL.L", "CASH.L", "CBG.L", "CLG.L", "CMC.L", "COB.L", "CTEC.L",
     "CVS.L", "DARK.L", "DNLM.L", "DTY.L", "ECM.L", "EMG.L", "ENTR.L",
-    "ESNT.L", "FDM.L", "FGP.L", "FLTK.L", "FSV.L", "GNC.L", "GPOR.L",
+    "ESNT.L", "FDM.L", "FGP.L", "FSV.L", "GNC.L", "GPOR.L",
     "GRI.L", "GRG.L", "GTLS.L", "HAT.L", "HBR.L", "HFD.L", "HMSO.L",
     "HUW.L", "HWDN.L", "IHG.L", "IMI.L", "INCH.L", "ITV.L", "JET2.L",
     "JUP.L", "KIE.L", "LAD.L", "LIO.L", "LRE.L", "MCS.L", "MERI.L",
@@ -72,7 +60,7 @@ FTSE_350_TICKERS = [
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# DEFAULT SCREENING THRESHOLDS
+# DEFAULT FILTERS
 # ─────────────────────────────────────────────────────────────────────────────
 
 DEFAULT_FILTERS = {
@@ -81,96 +69,197 @@ DEFAULT_FILTERS = {
     "max_pb": 4.0,
     "max_ev_ebitda": 15.0,
     "min_div_yield": 0.015,
-
     "min_momentum_3m": 0.0,
     "min_momentum_6m": 0.0,
     "min_momentum_12m": 0.0,
-
     "min_market_cap_m": 500,
     "min_volume": 50000,
 }
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# DATA HELPERS
+# DIVIDEND YIELD
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _norm_yield(y):
-    """Return dividend yield as a decimal fraction."""
-    if y is None or pd.isna(y):
+def get_dividend_yield(stock, price):
+    """
+    Calculate trailing 12-month dividend yield directly from
+    Yahoo Finance dividend history.
+
+    Formula:
+
+        Dividend Yield =
+            trailing 12-month dividends / current share price
+
+    This avoids relying on Yahoo's dividendYield fields,
+    which can have inconsistent units for LSE securities.
+    """
+
+    if price is None:
         return None
 
     try:
-        y = float(y)
-    except (TypeError, ValueError):
+        price = float(price)
+
+        if price <= 0:
+            return None
+
+        # Pull approximately 15 months so that we have enough
+        # history around the 12-month boundary.
+        dividends = stock.dividends
+
+        if dividends is None or dividends.empty:
+            return 0.0
+
+        dividends = dividends.dropna()
+
+        if dividends.empty:
+            return 0.0
+
+        # Make timezone handling safe.
+        try:
+            if dividends.index.tz is not None:
+                dividends.index = dividends.index.tz_localize(None)
+        except Exception:
+            pass
+
+        cutoff = pd.Timestamp.today().normalize() - pd.Timedelta(days=365)
+
+        trailing_dividends = dividends[
+            dividends.index >= cutoff
+        ]
+
+        if trailing_dividends.empty:
+            return 0.0
+
+        annual_dividends = trailing_dividends.sum()
+
+        if annual_dividends < 0:
+            return None
+
+        dividend_yield = (
+            annual_dividends / price
+        )
+
+        # Reject clearly impossible values.
+        if dividend_yield > 0.25:
+            return None
+
+        return float(dividend_yield)
+
+    except Exception:
         return None
 
-    # yfinance can return either 0.045 or 4.5 for a 4.5% yield.
-    if y > 1:
-        y /= 100
 
-    return y
+# ─────────────────────────────────────────────────────────────────────────────
+# FUNDAMENTALS
+# ─────────────────────────────────────────────────────────────────────────────
 
+def fetch_fundamentals(ticker):
 
-def fetch_fundamentals(ticker: str) -> dict:
-    """Fetch fundamental and market data for one ticker."""
     try:
+
         stock = yf.Ticker(ticker)
+
         info = stock.info
 
+        price = (
+            info.get("currentPrice")
+            or info.get("regularMarketPrice")
+        )
+
         market_cap = info.get("marketCap")
+
+        if price is None and market_cap is None:
+
+            return {
+                "ticker": ticker,
+                "_fetch_error": True,
+            }
+
         market_cap_m = (
             market_cap / 1_000_000
             if market_cap is not None
             else None
         )
 
+        # Calculate dividend yield directly from
+        # actual dividend payments.
+        div_yield = get_dividend_yield(
+            stock,
+            price
+        )
+
         return {
+
             "ticker": ticker,
-            "name": info.get("longName", ticker),
-            "sector": info.get("sector", "N/A"),
-            "industry": info.get("industry", "N/A"),
-            "price": (
-                info.get("currentPrice")
-                or info.get("regularMarketPrice")
+
+            "name": info.get(
+                "longName",
+                ticker
             ),
-            "market_cap_m": (
-                round(market_cap_m, 0)
-                if market_cap_m is not None
-                else None
+
+            "sector": info.get(
+                "sector",
+                "N/A"
             ),
-            "pe_ratio": info.get("trailingPE"),
-            "pb_ratio": info.get("priceToBook"),
-            "ev_ebitda": info.get("enterpriseToEbitda"),
-            "div_yield": _norm_yield(
-                info.get("dividendYield")
+
+            "price": price,
+
+            "market_cap_m": market_cap_m,
+
+            "pe_ratio": info.get(
+                "trailingPE"
             ),
-            "avg_volume": info.get("averageVolume"),
-            "52w_high": info.get("fiftyTwoWeekHigh"),
-            "52w_low": info.get("fiftyTwoWeekLow"),
-            "beta": info.get("beta"),
+
+            "pb_ratio": info.get(
+                "priceToBook"
+            ),
+
+            "ev_ebitda": info.get(
+                "enterpriseToEbitda"
+            ),
+
+            "div_yield": div_yield,
+
+            "avg_volume": info.get(
+                "averageVolume"
+            ),
+
+            "52w_high": info.get(
+                "fiftyTwoWeekHigh"
+            ),
+
+            "52w_low": info.get(
+                "fiftyTwoWeekLow"
+            ),
+
+            "beta": info.get(
+                "beta"
+            ),
         }
 
-    except Exception as exc:
+    except Exception:
+
         return {
             "ticker": ticker,
-            "name": ticker,
-            "sector": "N/A",
-            "_fetch_error": str(exc),
+            "_fetch_error": True,
         }
 
 
-def fetch_momentum(ticker: str, today: datetime.date) -> dict:
-    """
-    Calculate 3m, 6m and 12m price momentum.
+# ─────────────────────────────────────────────────────────────────────────────
+# MOMENTUM
+# ─────────────────────────────────────────────────────────────────────────────
 
-    Uses approximately 63, 126 and 252 trading-day windows.
-    Returns None where insufficient price history exists.
-    """
+def fetch_momentum(ticker, today):
+
     try:
+
         stock = yf.Ticker(ticker)
 
-        start = today - datetime.timedelta(days=370)
+        start = today - datetime.timedelta(
+            days=370
+        )
 
         hist = stock.history(
             start=start.strftime("%Y-%m-%d"),
@@ -183,9 +272,8 @@ def fetch_momentum(ticker: str, today: datetime.date) -> dict:
 
         close = hist["Close"].dropna()
 
-        def ret(days):
-            # Need at least days + 1 observations to calculate
-            # a genuine return from t-days to t.
+        def calculate_return(days):
+
             if len(close) <= days:
                 return None
 
@@ -195,15 +283,25 @@ def fetch_momentum(ticker: str, today: datetime.date) -> dict:
             if past_price <= 0:
                 return None
 
-            return current_price / past_price - 1
+            return (
+                current_price / past_price
+            ) - 1
 
         return {
-            "momentum_3m": ret(63),
-            "momentum_6m": ret(126),
-            "momentum_12m": ret(252),
+
+            "momentum_3m":
+                calculate_return(63),
+
+            "momentum_6m":
+                calculate_return(126),
+
+            "momentum_12m":
+                calculate_return(252),
+
         }
 
     except Exception:
+
         return {}
 
 
@@ -212,35 +310,11 @@ def fetch_momentum(ticker: str, today: datetime.date) -> dict:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def run_screener(
-    tickers: list = None,
-    filters: dict = None,
-    verbose: bool = True,
+    tickers=None,
+    filters=None,
+    verbose=True,
     **filter_overrides,
-) -> pd.DataFrame:
-    """
-    Run the equity screener.
-
-    Parameters
-    ----------
-    tickers : list, optional
-        Yahoo Finance tickers to screen.
-        Defaults to FTSE_350_TICKERS.
-
-    filters : dict, optional
-        Complete filter dictionary.
-        Defaults to DEFAULT_FILTERS.
-
-    verbose : bool
-        Print progress and results.
-
-    **filter_overrides
-        Override individual filters.
-
-    Returns
-    -------
-    pd.DataFrame
-        Numeric screening results sorted by P/E.
-    """
+):
 
     if tickers is None:
         tickers = FTSE_350_TICKERS
@@ -250,188 +324,309 @@ def run_screener(
     else:
         active_filters = filters.copy()
 
-    active_filters.update(filter_overrides)
+    active_filters.update(
+        filter_overrides
+    )
 
     today = datetime.date.today()
 
     if verbose:
+
         print("=" * 70)
-        print("  FTSE 350 EQUITY SCREENER")
-        print(f"  Run date : {today.strftime('%d %B %Y')}")
-        print(f"  Universe : {len(tickers)} tickers")
+
+        print(
+            "  FTSE 350 EQUITY SCREENER"
+        )
+
+        print(
+            f"  Run date : "
+            f"{today.strftime('%d %B %Y')}"
+        )
+
+        print(
+            f"  Universe : "
+            f"{len(tickers)} tickers"
+        )
+
         print("=" * 70)
 
         print("\nActive filters:")
+
         for key, value in active_filters.items():
-            print(f"  {key:<22} {value}")
+
+            print(
+                f"  {key:<22} {value}"
+            )
 
         print()
 
-    # ── Fetch data ───────────────────────────────────────────────────────────
-
     records = []
+
     failed_tickers = []
 
-    for i, ticker in enumerate(tickers, 1):
+    # ── Fetch data ───────────────────────────────────────────────────────────
+
+    for i, ticker in enumerate(
+        tickers,
+        1
+    ):
 
         if verbose and i % 20 == 0:
-            print(f"  Fetching {i}/{len(tickers)}...")
 
-        fundamentals = fetch_fundamentals(ticker)
-        momentum = fetch_momentum(ticker, today)
+            print(
+                f"  Fetching "
+                f"{i}/{len(tickers)}..."
+            )
 
-        if fundamentals.get("_fetch_error"):
-            failed_tickers.append(ticker)
-
-        records.append({
-            **fundamentals,
-            **momentum,
-        })
-
-    df = pd.DataFrame(records)
-
-    if "_fetch_error" in df.columns:
-        df = df.drop(columns=["_fetch_error"])
-
-    # ── Apply filters ────────────────────────────────────────────────────────
-
-    mask = pd.Series(True, index=df.index)
-
-    def safe_filter(col, op, threshold):
-        """
-        Apply a filter while allowing unavailable data to remain in
-        the universe rather than automatically failing the stock.
-        """
-        nonlocal mask
-
-        if col not in df.columns:
-            return
-
-        col_data = pd.to_numeric(
-            df[col],
-            errors="coerce",
+        fundamentals = fetch_fundamentals(
+            ticker
         )
 
-        available = col_data.notna()
+        if fundamentals.get(
+            "_fetch_error"
+        ):
 
-        if op == "<=":
-            mask &= (~available) | (col_data <= threshold)
+            failed_tickers.append(
+                ticker
+            )
 
-        elif op == ">=":
-            mask &= (~available) | (col_data >= threshold)
+            continue
 
-    safe_filter(
-        "pe_ratio",
-        "<=",
-        active_filters.get("max_pe", np.inf),
+        momentum = fetch_momentum(
+            ticker,
+            today
+        )
+
+        records.append(
+            {
+                **fundamentals,
+                **momentum
+            }
+        )
+
+    if not records:
+
+        print(
+            "\nNo usable market data."
+        )
+
+        return pd.DataFrame()
+
+    df = pd.DataFrame(
+        records
     )
 
-    safe_filter(
-        "pe_ratio",
-        ">=",
-        active_filters.get("min_pe", -np.inf),
+    # ── Filtering ───────────────────────────────────────────────────────────
+
+    mask = pd.Series(
+        True,
+        index=df.index
     )
 
-    # Prevent negative P/B and EV/EBITDA values from passing
-    # valuation screens.
-    safe_filter("pb_ratio", ">=", 0)
-    safe_filter(
+    def strict_filter(
+        column,
+        operator,
+        threshold,
+    ):
+
+        nonlocal mask
+
+        if column not in df.columns:
+            return
+
+        data = pd.to_numeric(
+            df[column],
+            errors="coerce"
+        )
+
+        if operator == "<=":
+
+            mask &= (
+                data.notna()
+                & (data <= threshold)
+            )
+
+        elif operator == ">=":
+
+            mask &= (
+                data.notna()
+                & (data >= threshold)
+            )
+
+    # P/E
+    if "min_pe" in active_filters:
+
+        strict_filter(
+            "pe_ratio",
+            ">=",
+            active_filters["min_pe"]
+        )
+
+    if "max_pe" in active_filters:
+
+        strict_filter(
+            "pe_ratio",
+            "<=",
+            active_filters["max_pe"]
+        )
+
+    # P/B
+    if "max_pb" in active_filters:
+
+        strict_filter(
+            "pb_ratio",
+            ">=",
+            0
+        )
+
+        strict_filter(
+            "pb_ratio",
+            "<=",
+            active_filters["max_pb"]
+        )
+
+    # EV/EBITDA
+    if "max_ev_ebitda" in active_filters:
+
+        strict_filter(
+            "ev_ebitda",
+            ">=",
+            0
+        )
+
+        strict_filter(
+            "ev_ebitda",
+            "<=",
+            active_filters["max_ev_ebitda"]
+        )
+
+    # Dividend yield
+    if "min_div_yield" in active_filters:
+
+        strict_filter(
+            "div_yield",
+            ">=",
+            active_filters["min_div_yield"]
+        )
+
+    # Momentum
+    if "min_momentum_3m" in active_filters:
+
+        strict_filter(
+            "momentum_3m",
+            ">=",
+            active_filters["min_momentum_3m"]
+        )
+
+    if "min_momentum_6m" in active_filters:
+
+        strict_filter(
+            "momentum_6m",
+            ">=",
+            active_filters["min_momentum_6m"]
+        )
+
+    if "min_momentum_12m" in active_filters:
+
+        strict_filter(
+            "momentum_12m",
+            ">=",
+            active_filters["min_momentum_12m"]
+        )
+
+    # Market cap
+    if "min_market_cap_m" in active_filters:
+
+        strict_filter(
+            "market_cap_m",
+            ">=",
+            active_filters["min_market_cap_m"]
+        )
+
+    # Volume
+    if "min_volume" in active_filters:
+
+        strict_filter(
+            "avg_volume",
+            ">=",
+            active_filters["min_volume"]
+        )
+
+    results = df.loc[
+        mask
+    ].copy()
+
+    # ── Formatting ───────────────────────────────────────────────────────────
+
+    numeric_columns = [
+        "pe_ratio",
         "pb_ratio",
-        "<=",
-        active_filters.get("max_pb", np.inf),
-    )
-
-    safe_filter("ev_ebitda", ">=", 0)
-    safe_filter(
         "ev_ebitda",
-        "<=",
-        active_filters.get("max_ev_ebitda", np.inf),
-    )
-
-    safe_filter(
-        "div_yield",
-        ">=",
-        active_filters.get("min_div_yield", -np.inf),
-    )
-
-    safe_filter(
-        "momentum_3m",
-        ">=",
-        active_filters.get("min_momentum_3m", -np.inf),
-    )
-
-    safe_filter(
-        "momentum_6m",
-        ">=",
-        active_filters.get("min_momentum_6m", -np.inf),
-    )
-
-    safe_filter(
-        "momentum_12m",
-        ">=",
-        active_filters.get("min_momentum_12m", -np.inf),
-    )
-
-    safe_filter(
+        "beta",
+        "price",
         "market_cap_m",
-        ">=",
-        active_filters.get("min_market_cap_m", -np.inf),
-    )
+        "div_yield",
+        "momentum_3m",
+        "momentum_6m",
+        "momentum_12m",
+    ]
 
-    safe_filter(
-        "avg_volume",
-        ">=",
-        active_filters.get("min_volume", -np.inf),
-    )
+    for column in numeric_columns:
 
-    results = df.loc[mask].copy()
+        if column in results.columns:
 
-    # ── Keep returned data numeric ──────────────────────────────────────────
+            results[column] = pd.to_numeric(
+                results[column],
+                errors="coerce"
+            )
 
-    for col in [
+    for column in [
         "pe_ratio",
         "pb_ratio",
         "ev_ebitda",
         "beta",
     ]:
-        if col in results.columns:
-            results[col] = pd.to_numeric(
-                results[col],
-                errors="coerce",
-            ).round(1)
+
+        if column in results.columns:
+
+            results[column] = results[
+                column
+            ].round(1)
 
     if "price" in results.columns:
-        results["price"] = pd.to_numeric(
-            results["price"],
-            errors="coerce",
-        ).round(2)
+
+        results["price"] = results[
+            "price"
+        ].round(2)
 
     if "market_cap_m" in results.columns:
-        results["market_cap_m"] = pd.to_numeric(
-            results["market_cap_m"],
-            errors="coerce",
-        ).round(0)
+
+        results["market_cap_m"] = results[
+            "market_cap_m"
+        ].round(0)
 
     if "div_yield" in results.columns:
-        results["div_yield"] = pd.to_numeric(
-            results["div_yield"],
-            errors="coerce",
-        ).round(4)
 
-    for col in [
+        results["div_yield"] = results[
+            "div_yield"
+        ].round(4)
+
+    for column in [
         "momentum_3m",
         "momentum_6m",
         "momentum_12m",
     ]:
-        if col in results.columns:
-            results[col] = pd.to_numeric(
-                results[col],
-                errors="coerce",
-            ).round(4)
 
-    # ── Select and sort output columns ──────────────────────────────────────
+        if column in results.columns:
 
-    display_cols = [
+            results[column] = results[
+                column
+            ].round(4)
+
+    # ── Output columns ──────────────────────────────────────────────────────
+
+    display_columns = [
+
         "ticker",
         "name",
         "sector",
@@ -447,52 +642,99 @@ def run_screener(
         "52w_low",
         "52w_high",
         "beta",
+
     ]
 
-    display_cols = [
-        col for col in display_cols
-        if col in results.columns
+    display_columns = [
+        column
+        for column in display_columns
+        if column in results.columns
     ]
 
-    results = results[display_cols]
+    results = results[
+        display_columns
+    ]
 
-    if "pe_ratio" in results.columns:
+    # Sort by strongest 12-month momentum
+    if "momentum_12m" in results.columns:
+
         results = results.sort_values(
-            "pe_ratio",
-            na_position="last",
+            "momentum_12m",
+            ascending=False,
+            na_position="last"
         )
 
-    # ── Console output ──────────────────────────────────────────────────────
+    # ── Print results ───────────────────────────────────────────────────────
 
     if verbose:
-        print(f"\n{'=' * 70}")
+
         print(
-            f"  RESULTS: {len(results)} stocks passed all filters"
+            f"\n{'=' * 70}"
         )
-        print(f"{'=' * 70}\n")
+
+        print(
+            f"  RESULTS: "
+            f"{len(results)} stocks "
+            f"passed all filters"
+        )
+
+        print(
+            f"{'=' * 70}"
+        )
+
+        print(
+            f"\n  Successfully retrieved: "
+            f"{len(df)}"
+        )
+
+        print(
+            f"  Unavailable/invalid:    "
+            f"{len(failed_tickers)}"
+        )
 
         if failed_tickers:
+
             print(
-                f"  Warning: {len(failed_tickers)} tickers "
-                "failed to return fundamental data."
+                "\n  Excluded tickers:"
             )
+
             print(
-                "  Failed tickers: "
-                + ", ".join(failed_tickers)
+                "  "
+                + ", ".join(
+                    failed_tickers
+                )
             )
-            print()
+
+        print()
 
         if len(results) > 0:
-            pd.set_option("display.max_columns", None)
-            pd.set_option("display.width", 220)
-            pd.set_option("display.max_rows", 100)
 
-            print(results.to_string(index=False))
+            pd.set_option(
+                "display.max_columns",
+                None
+            )
+
+            pd.set_option(
+                "display.width",
+                220
+            )
+
+            pd.set_option(
+                "display.max_rows",
+                100
+            )
+
+            print(
+                results.to_string(
+                    index=False
+                )
+            )
 
         else:
+
             print(
-                "  No stocks passed all filters. "
-                "Try relaxing thresholds."
+                "  No stocks passed "
+                "all filters."
             )
 
         print()
@@ -504,8 +746,7 @@ def run_screener(
 # PRESET SCREENS
 # ─────────────────────────────────────────────────────────────────────────────
 
-def value_screen() -> pd.DataFrame:
-    """Low P/E, low P/B and positive 12-month momentum."""
+def value_screen():
 
     print(
         "\n>>> VALUE SCREEN: "
@@ -513,18 +754,21 @@ def value_screen() -> pd.DataFrame:
     )
 
     filters = {
+
         "max_pe": 14,
         "min_pe": 5,
         "max_pb": 2.0,
         "min_momentum_12m": 0.0,
         "min_market_cap_m": 500,
+
     }
 
-    return run_screener(filters=filters)
+    return run_screener(
+        filters=filters
+    )
 
 
-def income_screen() -> pd.DataFrame:
-    """High dividend yield with reasonable valuation."""
+def income_screen():
 
     print(
         "\n>>> INCOME SCREEN: "
@@ -532,18 +776,21 @@ def income_screen() -> pd.DataFrame:
     )
 
     filters = {
+
         "max_pe": 20,
         "min_pe": 5,
         "min_div_yield": 0.04,
         "min_momentum_6m": 0.0,
         "min_market_cap_m": 500,
+
     }
 
-    return run_screener(filters=filters)
+    return run_screener(
+        filters=filters
+    )
 
 
-def momentum_screen() -> pd.DataFrame:
-    """Strong price momentum across all time horizons."""
+def momentum_screen():
 
     print(
         "\n>>> MOMENTUM SCREEN: "
@@ -551,21 +798,27 @@ def momentum_screen() -> pd.DataFrame:
     )
 
     filters = {
+
         "min_momentum_3m": 0.05,
         "min_momentum_6m": 0.08,
         "min_momentum_12m": 0.10,
         "min_market_cap_m": 500,
+
     }
 
-    return run_screener(filters=filters)
+    return run_screener(
+        filters=filters
+    )
 
 
-def quality_value_screen() -> pd.DataFrame:
-    """Balanced quality-value screen."""
+def quality_value_screen():
 
-    print("\n>>> QUALITY-VALUE SCREEN\n")
+    print(
+        "\n>>> QUALITY-VALUE SCREEN\n"
+    )
 
     filters = {
+
         "max_pe": 18,
         "min_pe": 5,
         "max_pb": 3.0,
@@ -573,13 +826,16 @@ def quality_value_screen() -> pd.DataFrame:
         "min_div_yield": 0.02,
         "min_momentum_6m": 0.0,
         "min_market_cap_m": 1000,
+
     }
 
-    return run_screener(filters=filters)
+    return run_screener(
+        filters=filters
+    )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# MAIN
+# MAIN PROGRAM
 # ─────────────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
@@ -596,45 +852,57 @@ if __name__ == "__main__":
     )
 
     print("Select a screen:")
+
     print(
         "  1. Default screen "
         "(P/E ≤ 25, P/B ≤ 4, positive momentum)"
     )
+
     print(
-        "  2. Value screen   "
+        "  2. Value screen "
         "(P/E ≤ 14, P/B ≤ 2, 12m momentum > 0)"
     )
+
     print(
-        "  3. Income screen  "
+        "  3. Income screen "
         "(Yield ≥ 4%, P/E ≤ 20, 6m momentum > 0)"
     )
+
     print(
         "  4. Momentum screen "
         "(3m > 5%, 6m > 8%, 12m > 10%)"
     )
+
     print(
-        "  5. Quality-value  "
+        "  5. Quality-value "
         "(P/E ≤ 18, EV/EBITDA ≤ 12, yield ≥ 2%)"
     )
+
     print()
 
     choice = input(
-        "Enter choice (1-5) or press Enter for default: "
+        "Enter choice (1-5) "
+        "or press Enter for default: "
     ).strip()
 
     if choice == "2":
+
         results = value_screen()
 
     elif choice == "3":
+
         results = income_screen()
 
     elif choice == "4":
+
         results = momentum_screen()
 
     elif choice == "5":
+
         results = quality_value_screen()
 
     else:
+
         results = run_screener()
 
     # ── Save results ─────────────────────────────────────────────────────────
@@ -642,22 +910,22 @@ if __name__ == "__main__":
     if len(results) > 0:
 
         out_file = (
-            f"ftse350_screen_results_"
+            "ftse350_screen_results_"
             f"{datetime.date.today()}.csv"
         )
 
         results.to_csv(
             out_file,
-            index=False,
+            index=False
         )
 
         print(
-            f"\nResults saved to: {out_file}"
+            f"Results saved to: "
+            f"{out_file}"
         )
 
     else:
 
         print(
-            "\nNo results to save. "
-            "Try relaxing filter thresholds."
+            "No results to save."
         )
