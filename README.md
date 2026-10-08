@@ -9,7 +9,7 @@ A Python-based equity screening tool for a sample of FTSE 350 constituents liste
 * Calculates dividend yield from dividends paid over the trailing 365 days relative to the current share price
 * Calculates 3-month, 6-month and 12-month price momentum
 * Applies minimum market-cap and trading-volume filters
-* Provides four predefined investment screens plus a default screen
+* Provides four predefined screening strategies plus a default screen
 * Reports unavailable or invalid tickers rather than stopping the entire screening process
 * Exports screening results to a dated CSV file
 
