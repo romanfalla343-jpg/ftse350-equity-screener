@@ -109,11 +109,10 @@ ftse350-equity-screener/
 ├── ftse350_equity_screener.py
 ├── requirements.txt
 ├── .gitignore
-└── screenshots/
-    ├── value_screen.png
-    ├── income_screen.png
-    ├── momentum_screen.png
-    └── quality_value_screen.png
+├── value_screen.png
+├── income_screen.png
+├── momentum_screen.png
+└── quality_value_screen.png
 ```
 
 ## Limitations
