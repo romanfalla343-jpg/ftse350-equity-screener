@@ -14,9 +14,9 @@ A Python tool that screens FTSE 350 stocks in real time using valuation multiple
 | Screen | Criteria |
 |--------|----------|
 | Value | P/E ≤ 14, P/B ≤ 2, positive 12m momentum |
-| Income | Dividend yield ≥ 4%, P/E ≤ 20 |
+| Income | Dividend yield ≥ 4%, P/E ≤ 20, 6m momentum > 0 |
 | Momentum | 3m > 5%, 6m > 8%, 12m > 10% |
-| Quality-Value | P/E ≤ 18, EV/EBITDA ≤ 12, yield ≥ 2% |
+| Quality-Value | P/E ≤ 18, P/B ≤ 3, EV/EBITDA ≤ 12, yield ≥ 2%, 6m momentum > 0, market cap ≥ £1bn |
 
 ## Usage
 
@@ -34,4 +34,4 @@ results = run_screener(max_pe=15, min_div_yield=0.03, min_momentum_3m=0.05)
 
 ## Methodology
 
-Momentum is calculated as trailing price returns over 63, 126, and 252 trading days (approximate 3, 6, and 12 month windows). Valuation data is sourced from Yahoo Finance's fundamentals feed. Universe covers LSE-listed FTSE 350 constituents using `.L` ticker suffixes.
+Momentum is calculated as trailing price returns over 63, 126, and 252 trading days (approximate 3, 6, and 12 month windows). Valuation data is sourced from Yahoo Finance's fundamentals feed. Universe is a hand-picked sample of 196 LSE-listed FTSE 350 constituents (not the full index), using `.L` ticker suffixes. Dividend yields are normalised to fractions because yfinance has returned both formats.

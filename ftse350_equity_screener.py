@@ -4,7 +4,7 @@ FTSE 350 Equity Screener
 Filters FTSE 350 stocks by valuation multiples and momentum signals.
 
 Author: Roman Falla
-GitHub: github.com/roman-falla
+GitHub: github.com/romanfalla343-jpg
 
 Dependencies:
     pip install yfinance pandas numpy
@@ -27,7 +27,8 @@ warnings.filterwarnings("ignore")
 
 # ─────────────────────────────────────────────────────────────────────────────
 # FTSE 350 TICKERS
-# A representative sample of FTSE 350 constituents (London Stock Exchange)
+# A hand-picked sample of FTSE 350 constituents (London Stock Exchange), not the full index.
+# Delisted/renamed tickers are removed; check the list periodically.
 # Tickers use the Yahoo Finance format (suffix .L for LSE-listed stocks)
 # ─────────────────────────────────────────────────────────────────────────────
 FTSE_350_TICKERS = [
@@ -39,23 +40,22 @@ FTSE_350_TICKERS = [
     "FRES.L", "GLEN.L", "GSK.L", "HIK.L", "HL.L", "HLMA.L", "HLN.L",
     "HSBA.L", "IAG.L", "ICP.L", "IGG.L", "IMB.L", "INF.L", "ITRK.L",
     "JD.L", "KGF.L", "LAND.L", "LGEN.L", "LLOY.L", "LMP.L", "LSE.L",
-    "MNDI.L", "MNG.L", "MRO.L", "NG.L", "NWG.L", "NXT.L", "OCDO.L",
-    "PCT.L", "PHNX.L", "PRU.L", "PSH.L", "PSN.L", "PSON.L", "RB.L",
-    "RDSA.L", "REL.L", "RIO.L", "RKT.L", "RMV.L", "RR.L", "RS1.L",
+    "MNDI.L", "MNG.L", "NG.L", "NWG.L", "NXT.L", "OCDO.L",
+    "PCT.L", "PHNX.L", "PRU.L", "PSH.L", "PSN.L", "PSON.L", "RB.L", "REL.L", "RIO.L", "RKT.L", "RMV.L", "RR.L", "RS1.L",
     "RTO.L", "SBRY.L", "SDR.L", "SGE.L", "SGRO.L", "SHEL.L", "SKG.L",
     "SMDS.L", "SMIN.L", "SMT.L", "SN.L", "SPX.L", "SSE.L", "STAN.L",
     "SVT.L", "TSCO.L", "TW.L", "ULVR.L", "UU.L", "VOD.L", "WEIR.L",
     "WPP.L", "WTB.L",
     # FTSE 250 (selection)
     "ABG.L", "ACSO.L", "AGK.L", "AML.L", "BNZL.L", "BOWL.L", "BTG.L",
-    "CAL.L", "CASH.L", "CBG.L", "CINE.L", "CLG.L", "CMC.L", "COB.L",
-    "CTEC.L", "CVS.L", "DARK.L", "DNLM.L", "DTY.L", "DWF.L", "ECM.L",
+    "CAL.L", "CASH.L", "CBG.L", "CLG.L", "CMC.L", "COB.L",
+    "CTEC.L", "CVS.L", "DARK.L", "DNLM.L", "DTY.L", "ECM.L",
     "EMG.L", "ENTR.L", "ESNT.L", "FDM.L", "FGP.L", "FLTK.L", "FSV.L",
     "GNC.L", "GPOR.L", "GRI.L", "GRG.L", "GTLS.L", "HAT.L", "HBR.L",
     "HFD.L", "HMSO.L", "HUW.L", "HWDN.L", "IHG.L", "IMI.L", "INCH.L",
     "ITV.L", "JET2.L", "JUP.L", "KIE.L", "LAD.L", "LIO.L", "LRE.L",
-    "MCS.L", "MERI.L", "MGAM.L", "MKS.L", "MNKS.L", "MPI.L", "MRW.L",
-    "MTM.L", "MTO.L", "MWE.L", "NCT.L", "NETW.L", "NMC.L", "NXRT.L",
+    "MCS.L", "MERI.L", "MGAM.L", "MKS.L", "MNKS.L", "MPI.L",
+    "MTM.L", "MTO.L", "MWE.L", "NCT.L", "NETW.L", "NXRT.L",
     "OSB.L", "OXB.L", "PAG.L", "PCA.L", "PETS.L", "PFC.L", "PMVD.L",
     "PNN.L", "POLR.L", "PZC.L", "QQ.L", "RDW.L", "RGD.L", "RHI.L",
     "RHIM.L", "RNK.L", "SAFE.L", "SCT.L", "SHI.L", "SLA.L", "SLP.L",
@@ -90,6 +90,14 @@ DEFAULT_FILTERS = {
 # DATA FETCHING
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _norm_yield(y):
+    """Return dividend yield as a fraction. Newer yfinance versions return a
+    percentage (e.g. 4.5), older ones a fraction (0.045)."""
+    if y is None:
+        return None
+    return y / 100 if y > 1 else y
+
+
 def fetch_fundamentals(ticker: str) -> dict:
     """Fetch key fundamental and price data for a single ticker."""
     try:
@@ -109,7 +117,7 @@ def fetch_fundamentals(ticker: str) -> dict:
             "pe_ratio":      info.get("trailingPE"),
             "pb_ratio":      info.get("priceToBook"),
             "ev_ebitda":     info.get("enterpriseToEbitda"),
-            "div_yield":     info.get("dividendYield"),
+            "div_yield":     _norm_yield(info.get("dividendYield")),
             "avg_volume":    info.get("averageVolume"),
             "52w_high":      info.get("fiftyTwoWeekHigh"),
             "52w_low":       info.get("fiftyTwoWeekLow"),
