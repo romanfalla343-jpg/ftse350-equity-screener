@@ -123,3 +123,17 @@ ftse350-equity-screener/
 * Some companies, particularly financial institutions and investment trusts, may not have meaningful values for metrics such as EV/EBITDA.
 * Momentum is based on historical price performance and is not a prediction of future returns.
 * The screens are quantitative filters and should not be interpreted as investment recommendations.
+
+## Example Outputs
+
+### Value Screen
+![Value Screen](value_screen.png)
+
+### Income Screen
+![Income Screen](income_screen.png)
+
+### Momentum Screen
+![Momentum Screen](momentum_screen.png)
+
+### Quality-Value Screen
+![Quality-Value Screen](quality_value_screen.png)
